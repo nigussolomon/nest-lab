@@ -14,7 +14,8 @@
     "skipLibCheck": true,
     "skipDefaultLibCheck": true,
     "paths": {
-      "@nest-lab/core": ["./packages/core/src/index.ts"]
+      "@nest-lab/core": ["./packages/core/src/index.ts"],
+      "@nest-lab/storage": ["./packages/storage/src/index.ts"]
     }
   },
   "exclude": ["node_modules", "tmp"]
