@@ -13,7 +13,9 @@
     "lib": ["es2020", "dom"],
     "skipLibCheck": true,
     "skipDefaultLibCheck": true,
-    "paths": {}
+    "paths": {
+      "@nest-lab/core": ["./packages/core/src/index.ts"]
+    }
   },
   "exclude": ["node_modules", "tmp"]
 }
