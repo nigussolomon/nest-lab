@@ -80,6 +80,15 @@
       "options": {
         "passWithNoTests": true
       }
+    },
+    "e2e": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/apps/api"],
+      "options": {
+        "jestConfig": "apps/api/jest.config.cts",
+        "testPathPattern": ["e2e-spec"],
+        "testNamePattern": "CRUD e2e"
+      }
     }
   }
 }

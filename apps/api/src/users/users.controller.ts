@@ -8,5 +8,5 @@ export const UsersController = CrudControllerFactory({
   createDto: CreateUserDto,
   updateDto: UpdateUserDto,
   responseDto: UserResponseDto,
-  allowedFilters: ['name', 'email', 'id'],
+  allowedFilters: ['name', 'email', 'id', 'categoryId'],
 });
