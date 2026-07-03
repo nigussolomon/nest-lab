@@ -72,7 +72,7 @@ describe('CrudControllerFactory', () => {
     const Controller = CrudControllerFactory({
       service: TestService as any,
       path: 'test',
-      allowedFilters: ['email', 'name'],
+      allowedFilters: ['email', 'name'] as any,
     });
 
     expect(Controller.prototype.findAll).toBeDefined();
@@ -83,11 +83,11 @@ describe('CrudControllerFactory', () => {
     const Controller = CrudControllerFactory({
       service: TestService as any,
       path: 'test',
-      allowedFilters: ['email'],
+      allowedFilters: ['email'] as any,
     });
 
     const findAllFn = Controller.prototype.findAll;
-    const path = Reflect.getMetadata(PATH_METADATA, findAllFn);
-    expect(path).toBe('/');
+    const pathMeta = Reflect.getMetadata(PATH_METADATA, findAllFn);
+    expect(pathMeta).toBe('/');
   });
 });

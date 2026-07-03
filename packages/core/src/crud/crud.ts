@@ -23,25 +23,74 @@ import {
   ApiNotFoundResponse,
 } from '@nestjs/swagger';
 import { AnyPgTable, AnyPgColumn, PgTable } from 'drizzle-orm/pg-core';
-import { InferInsertModel, InferSelectModel, SQL, and, eq, ilike } from 'drizzle-orm';
+import {
+  InferInsertModel,
+  InferSelectModel,
+  SQL,
+  and,
+  or,
+  eq,
+  ne,
+  gt,
+  gte,
+  lt,
+  lte,
+  ilike,
+  like,
+  inArray,
+  notInArray,
+  isNull,
+  isNotNull,
+} from 'drizzle-orm';
 import { DrizzleService } from '../database/database.service';
 
 export type EndpointName = 'findAll' | 'findOne' | 'create' | 'update' | 'delete';
 
-export type FilterOperator = 'eq' | 'contains';
+export type ServiceColumns<TService extends CrudService<AnyPgTable>> =
+  TService extends CrudService<infer TTable, any, any, any>
+    ? string & keyof InferSelectModel<TTable>
+    : string;
 
-export interface FilterConfig {
-  name: string;
-  description?: string;
-  example?: string;
-  required?: boolean;
-  operator?: FilterOperator;
-}
+export type FilterOperator =
+  | 'eq'
+  | 'ne'
+  | 'contains'
+  | 'startsWith'
+  | 'endsWith'
+  | 'like'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'in'
+  | 'notIn'
+  | 'isNull'
+  | 'isNotNull';
 
-export type AllowedFilter = string | FilterConfig;
+const OPERATOR_SUFFIXES: Record<string, FilterOperator> = {
+  eq: 'eq',
+  ne: 'ne',
+  contains: 'contains',
+  starts: 'startsWith',
+  ends: 'endsWith',
+  like: 'like',
+  gt: 'gt',
+  gte: 'gte',
+  lt: 'lt',
+  lte: 'lte',
+  in: 'in',
+  notin: 'notIn',
+  'not_in': 'notIn',
+  null: 'isNull',
+  notnull: 'isNotNull',
+  'not_null': 'isNotNull',
+};
+
+const DEFAULT_OPERATOR: FilterOperator = 'contains';
 
 export interface CrudControllerOptions<
   TService extends CrudService<AnyPgTable>,
+  TColumn extends string = ServiceColumns<TService>,
 > {
   service: abstract new (...args: never[]) => TService;
   path: string;
@@ -50,7 +99,7 @@ export interface CrudControllerOptions<
   responseDto?: new (...args: any[]) => any;
   handlers?: CrudHandlers<TService>;
   exclude?: EndpointName[];
-  allowedFilters?: AllowedFilter[];
+  allowedFilters?: TColumn[];
 }
 
 export interface CrudHandlers<TService extends CrudService<AnyPgTable>> {
@@ -61,12 +110,18 @@ export interface CrudHandlers<TService extends CrudService<AnyPgTable>> {
   delete?: (this: { service: TService }, id: string) => Promise<any>;
 }
 
+export interface FilterEntry {
+  column: string;
+  operator: FilterOperator;
+  value: string;
+}
+
 export interface FindAllOptions {
   where?: SQL;
   limit?: number;
   offset?: number;
-  filters?: Record<string, string>;
-  filterConfigs?: FilterConfig[];
+  filters?: FilterEntry[];
+  orFilters?: FilterEntry[];
 }
 
 export class CrudService<
@@ -91,26 +146,76 @@ export class CrudService<
       .from(this.table as PgTable)
       .$dynamic();
 
-    const conditions: SQL[] = [];
-
-    if (options?.filters) {
-      const configMap = new Map(
-        (options.filterConfigs ?? []).map((fc) => [fc.name, fc]),
-      );
-      for (const [key, value] of Object.entries(options.filters)) {
-        const column = (this.table as Record<string, unknown>)[key];
-        if (!column || !value) continue;
-        const operator = configMap.get(key)?.operator ?? 'contains';
-        if (operator === 'contains') {
-          conditions.push(ilike(column as AnyPgColumn, `%${value}%`));
-        } else {
-          conditions.push(eq(column as AnyPgColumn, value));
-        }
+    function buildCondition(
+      col: unknown,
+      value: string,
+      op: FilterOperator,
+    ): SQL | null {
+      const column = col as AnyPgColumn;
+      switch (op) {
+        case 'eq':
+          return eq(column, value);
+        case 'ne':
+          return ne(column, value);
+        case 'contains':
+          return ilike(column, `%${value}%`);
+        case 'startsWith':
+          return ilike(column, `${value}%`);
+        case 'endsWith':
+          return ilike(column, `%${value}`);
+        case 'like':
+          return like(column, value);
+        case 'gt':
+          return gt(column, value);
+        case 'gte':
+          return gte(column, value);
+        case 'lt':
+          return lt(column, value);
+        case 'lte':
+          return lte(column, value);
+        case 'in':
+          return inArray(column, value.split(',').map((v) => v.trim()));
+        case 'notIn':
+          return notInArray(column, value.split(',').map((v) => v.trim()));
+        case 'isNull':
+          return isNull(column);
+        case 'isNotNull':
+          return isNotNull(column);
+        default:
+          return ilike(column, `%${value}%`);
       }
     }
 
-    if (options?.where) conditions.push(options.where);
-    if (conditions.length > 0) query.where(and(...conditions));
+    const mapEntries = (entries: FilterEntry[] | undefined) => {
+      return (entries ?? [])
+        .map((e) => {
+          const col = (this.table as Record<string, unknown>)[e.column];
+          if (!col) return null;
+          if (e.operator === 'isNull' || e.operator === 'isNotNull') {
+            return buildCondition(col, '', e.operator);
+          }
+          if (!e.value) return null;
+          return buildCondition(col, e.value, e.operator);
+        })
+        .filter((c): c is SQL => c !== null);
+    };
+
+    const andConditions = mapEntries(options?.filters);
+    const orConditions = mapEntries(options?.orFilters);
+
+    if (options?.where) andConditions.push(options.where);
+
+    const andGroup = andConditions.length > 0 ? (and(...andConditions) as SQL) : null;
+    const orGroup = orConditions.length > 0 ? (or(...orConditions) as SQL) : null;
+
+    if (andGroup && orGroup) {
+      query.where(or(andGroup, orGroup) as SQL);
+    } else if (andGroup) {
+      query.where(andGroup);
+    } else if (orGroup) {
+      query.where(orGroup);
+    }
+
     if (options?.limit) query.limit(options.limit);
     if (options?.offset) query.offset(options.offset);
     return query as unknown as Promise<TResponse[]>;
@@ -177,6 +282,48 @@ export class CrudService<
   }
 }
 
+function parseFilterParam(
+  key: string,
+  allowedFields: Set<string>,
+): { field: string; operator: FilterOperator; or: boolean } | null {
+  const parts = key.split('__');
+  const field = parts[0];
+  if (!allowedFields.has(field)) return null;
+
+  let operator: FilterOperator = DEFAULT_OPERATOR;
+  let or = false;
+
+  for (const suffix of parts.slice(1)) {
+    const lower = suffix.toLowerCase();
+    if (lower === 'or') {
+      or = true;
+    } else {
+      const op = OPERATOR_SUFFIXES[lower];
+      if (op) operator = op;
+    }
+  }
+
+  return { field, operator, or };
+}
+
+const GENERATED_QUERY_PARAMS = [
+  { suffix: '', label: 'contains' },
+  { suffix: '__eq', label: 'eq' },
+  { suffix: '__ne', label: 'ne' },
+  { suffix: '__contains', label: 'contains' },
+  { suffix: '__starts', label: 'starts with' },
+  { suffix: '__ends', label: 'ends with' },
+  { suffix: '__like', label: 'SQL like' },
+  { suffix: '__gt', label: 'greater than' },
+  { suffix: '__gte', label: '>= ' },
+  { suffix: '__lt', label: 'less than' },
+  { suffix: '__lte', label: '<=' },
+  { suffix: '__in', label: 'in list (csv)' },
+  { suffix: '__notin', label: 'not in list' },
+  { suffix: '__null', label: 'is null' },
+  { suffix: '__notnull', label: 'is not null' },
+];
+
 export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
   options: CrudControllerOptions<TService>,
 ) {
@@ -192,20 +339,27 @@ export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
   } = options;
 
   const excludeSet = new Set(exclude);
-
-  const filterConfigs: FilterConfig[] = allowedFilters.map((f) =>
-    typeof f === 'string' ? { name: f } : f,
-  );
+  const allowedFields = new Set(allowedFilters);
 
   function filterQueries(): MethodDecorator {
     return (target, key, descriptor) => {
-      for (const fc of filterConfigs) {
+      for (const field of allowedFields) {
+        for (const { suffix, label } of GENERATED_QUERY_PARAMS) {
+          const isDefault = suffix === '';
+          ApiQuery({
+            name: `${field}${suffix}`,
+            required: false,
+            type: String,
+            description: isDefault
+              ? `Filter by ${field}`
+              : `Filter by ${field} (${label})`,
+          })(target, key, descriptor);
+        }
         ApiQuery({
-          name: fc.name,
-          required: fc.required ?? false,
+          name: `${field}__or`,
+          required: false,
           type: String,
-          description: fc.description ?? `Filter results by ${fc.name}`,
-          ...(fc.example ? { example: fc.example } : {}),
+          description: `Filter by ${field} (OR)`,
         })(target, key, descriptor);
       }
     };
@@ -228,13 +382,22 @@ export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
     )
     async findAll(@Query() query: Record<string, string>) {
       if (handlers?.findAll) return handlers.findAll.call(this, query);
-      const filters: Record<string, string> = {};
-      for (const { name } of filterConfigs) {
-        if (query[name] !== undefined) {
-          filters[name] = query[name];
-        }
+
+      const andFilters: FilterEntry[] = [];
+      const orFilters: FilterEntry[] = [];
+
+      for (const [key, value] of Object.entries(query)) {
+        const parsed = parseFilterParam(key, allowedFields);
+        if (!parsed) continue;
+        const target = parsed.or ? orFilters : andFilters;
+        target.push({
+          column: parsed.field,
+          operator: parsed.operator,
+          value,
+        });
       }
-      return this.service.findAll({ filters, filterConfigs });
+
+      return this.service.findAll({ filters: andFilters, orFilters });
     }
 
     @Get(':id')
