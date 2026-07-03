@@ -10,10 +10,12 @@ import * as schema from '../schema';
 
 const request = require('supertest');
 
-const pool = new Pool({ connectionString: process.env['DATABASE_URL'] });
-const db = drizzle(pool, { schema });
+const databaseUrl = process.env['DATABASE_URL'];
+const describeCrud = databaseUrl ? describe : describe.skip;
 
-describe('CRUD e2e', () => {
+describeCrud('CRUD e2e', () => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  const db = drizzle(pool, { schema });
   let app: INestApplication;
   let server: any;
   let dbOk = false;
@@ -35,7 +37,12 @@ describe('CRUD e2e', () => {
     await db.insert(schema.posts).values([
       { id: 1, title: 'Intro to NestJS', content: 'NestJS rocks', authorId: 1 },
       { id: 2, title: 'Drizzle Guide', content: 'ORM basics', authorId: 1 },
-      { id: 3, title: 'Design Patterns', content: 'Learn patterns', authorId: 2 },
+      {
+        id: 3,
+        title: 'Design Patterns',
+        content: 'Learn patterns',
+        authorId: 2,
+      },
     ]);
   }
 
@@ -118,9 +125,7 @@ describe('CRUD e2e', () => {
 
   describe('Filters', () => {
     it('default contains (case-insensitive)', async () => {
-      const res = await request(server)
-        .get('/api/users?name=john')
-        .expect(200);
+      const res = await request(server).get('/api/users?name=john').expect(200);
       expect(res.body).toHaveLength(1);
       expect(res.body[0].name).toBe('John Doe');
     });
@@ -141,10 +146,14 @@ describe('CRUD e2e', () => {
     });
 
     it('__starts & __ends', async () => {
-      const s = await request(server).get('/api/users?name__starts=John').expect(200);
+      const s = await request(server)
+        .get('/api/users?name__starts=John')
+        .expect(200);
       expect(s.body).toHaveLength(1);
 
-      const e = await request(server).get('/api/users?name__ends=Doe').expect(200);
+      const e = await request(server)
+        .get('/api/users?name__ends=Doe')
+        .expect(200);
       expect(e.body).toHaveLength(1);
     });
 
@@ -163,10 +172,14 @@ describe('CRUD e2e', () => {
     });
 
     it('__in & __notin', async () => {
-      const ins = await request(server).get('/api/users?id__in=1,3').expect(200);
+      const ins = await request(server)
+        .get('/api/users?id__in=1,3')
+        .expect(200);
       expect(ins.body).toHaveLength(2);
 
-      const nin = await request(server).get('/api/users?id__notin=1,3').expect(200);
+      const nin = await request(server)
+        .get('/api/users?id__notin=1,3')
+        .expect(200);
       expect(nin.body.length).toBeGreaterThanOrEqual(2);
     });
 
@@ -294,9 +307,7 @@ describe('CRUD e2e', () => {
 
   describe('Categories CRUD', () => {
     it('GET /api/categories — list all', async () => {
-      const { body } = await request(server)
-        .get('/api/categories')
-        .expect(200);
+      const { body } = await request(server).get('/api/categories').expect(200);
       expect(body).toHaveLength(2);
     });
 
