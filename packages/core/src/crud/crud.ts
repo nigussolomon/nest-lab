@@ -10,6 +10,10 @@ import {
   Inject,
   HttpCode,
   HttpStatus,
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { PATH_METADATA, METHOD_METADATA } from '@nestjs/common/constants';
 import {
@@ -100,6 +104,7 @@ export interface CrudControllerOptions<
   handlers?: CrudHandlers<TService>;
   exclude?: EndpointName[];
   allowedFilters?: TColumn[];
+  relations?: Record<string, RelationConfig>;
 }
 
 export interface CrudHandlers<TService extends CrudService<AnyPgTable>> {
@@ -116,12 +121,74 @@ export interface FilterEntry {
   value: string;
 }
 
+export interface RelationConfig {
+  table: AnyPgTable;
+  on: { local: string; target: string };
+  type?: 'left' | 'inner';
+  relations?: Record<string, RelationConfig>;
+}
+
+export interface JoinConfig {
+  table: AnyPgTable;
+  sourceTable: AnyPgTable;
+  on: { local: string; target: string };
+  type?: 'left' | 'inner';
+  as: string;
+}
+
 export interface FindAllOptions {
   where?: SQL;
   limit?: number;
   offset?: number;
   filters?: FilterEntry[];
   orFilters?: FilterEntry[];
+  joins?: JoinConfig[];
+}
+
+function camelize(snake: string): string {
+  return snake.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+function resolveIncludes(
+  paths: string[],
+  relations: Record<string, RelationConfig>,
+  rootTable: AnyPgTable,
+): JoinConfig[] {
+  const seen = new Map<string, JoinConfig>();
+  function walk(
+    parts: string[],
+    parent: Record<string, RelationConfig>,
+    sourceTable: AnyPgTable,
+    prefix: string,
+  ) {
+    if (parts.length === 0) return;
+    const [first, ...rest] = parts;
+    const cfg = parent[first];
+    if (!cfg) return;
+    const fullPath = prefix ? `${prefix}.${first}` : first;
+    if (!seen.has(fullPath)) {
+      seen.set(fullPath, {
+        ...cfg,
+        sourceTable,
+        as: fullPath,
+      });
+    }
+    walk(rest, cfg.relations ?? {}, cfg.table, fullPath);
+  }
+  for (const p of paths) {
+    walk(p.split('.'), relations, rootTable, '');
+  }
+  return Array.from(seen.values());
+}
+
+function deepSet(obj: any, path: string, value: any) {
+  const parts = path.split('.');
+  let current = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (!current[parts[i]]) current[parts[i]] = {};
+    current = current[parts[i]];
+  }
+  current[parts[parts.length - 1]] = value;
 }
 
 export class CrudService<
@@ -131,7 +198,7 @@ export class CrudService<
   TResponse = InferSelectModel<TTable>,
 > {
   constructor(
-    protected readonly table: TTable,
+    public readonly table: TTable,
     protected readonly drizzleService: DrizzleService,
     protected readonly pkColumn?: AnyPgColumn,
   ) {}
@@ -140,11 +207,100 @@ export class CrudService<
     return this.drizzleService.db;
   }
 
+  private handleError(err: any, action: string): never {
+    if (typeof err?.getStatus === 'function') throw err;
+
+    const cause = err?.cause ?? err;
+    const code = cause?.code ?? '';
+    const detail = cause?.detail ?? '';
+    const constraint = cause?.constraint ?? '';
+    const column = cause?.column ?? '';
+    const message = cause?.message ?? '';
+
+    const isDev = process.env['NODE_ENV'] !== 'production';
+
+    const extractFkField = () => {
+      const match = detail.match(/Key \(([^)]+)\)/);
+      if (match) return camelize(match[1]);
+      const inMsg = message.match(/column "([^"]+)"/);
+      if (inMsg) return inMsg[1];
+      return column || 'field';
+    };
+
+    const extractUniqueField = () => {
+      if (column) return column;
+      const inMsg = message.match(/Key \(([^)]+)\)/);
+      if (inMsg) return camelize(inMsg[1]);
+      if (constraint) {
+        const parts = constraint.replace(/_unique$|_key$/i, '').split('_');
+        const last = parts[parts.length - 1];
+        if (last) return last;
+      }
+      return 'field';
+    };
+
+    const extractNotNullField = () => {
+      if (column) return column;
+      const inMsg = message.match(/column "([^"]+)"/);
+      if (inMsg) return inMsg[1];
+      if (constraint) {
+        const cleaned = constraint.replace(/^not_null_?|_not_null$/i, '');
+        if (cleaned) return cleaned;
+      }
+      return 'field';
+    };
+
+    let msg: string;
+    let status: number;
+
+    if (code === '23503') {
+      status = HttpStatus.BAD_REQUEST;
+      msg = `Cannot ${action}: ${extractFkField()} references a record that does not exist`;
+    } else if (code === '23505') {
+      status = HttpStatus.CONFLICT;
+      msg = `Cannot ${action}: ${extractUniqueField()} must be unique`;
+    } else if (code === '23502') {
+      status = HttpStatus.BAD_REQUEST;
+      msg = `Cannot ${action}: ${extractNotNullField()} is required`;
+    } else {
+      status = HttpStatus.INTERNAL_SERVER_ERROR;
+      msg = `Failed to ${action}`;
+    }
+
+    const body: any = { statusCode: status, message: msg };
+    if (isDev) {
+      body.devErrors = { code, detail, constraint, column, message: cause?.message };
+    }
+
+    throw new (status === HttpStatus.BAD_REQUEST
+      ? BadRequestException
+      : status === HttpStatus.CONFLICT
+        ? ConflictException
+        : InternalServerErrorException)(body);
+  }
+
   async findAll(options?: FindAllOptions): Promise<TResponse[]> {
-    const query = this.db
+    let base: any = this.db
       .select()
-      .from(this.table as PgTable)
-      .$dynamic();
+      .from(this.table as PgTable);
+
+    if (options?.joins) {
+      for (const join of options.joins) {
+        const src = join.sourceTable as unknown as Record<string, any>;
+        const tgt = join.table as unknown as Record<string, any>;
+        const condition = eq(
+          src[join.on.local] as AnyPgColumn,
+          tgt[join.on.target] as AnyPgColumn,
+        );
+        if (join.type === 'inner') {
+          base = base.innerJoin(join.table, condition);
+        } else {
+          base = base.leftJoin(join.table, condition);
+        }
+      }
+    }
+
+    const query: any = base.$dynamic();
 
     function buildCondition(
       col: unknown,
@@ -189,7 +345,7 @@ export class CrudService<
     const mapEntries = (entries: FilterEntry[] | undefined) => {
       return (entries ?? [])
         .map((e) => {
-          const col = (this.table as Record<string, unknown>)[e.column];
+          const col = (this.table as unknown as Record<string, any>)[e.column];
           if (!col) return null;
           if (e.operator === 'isNull' || e.operator === 'isNotNull') {
             return buildCondition(col, '', e.operator);
@@ -218,7 +374,22 @@ export class CrudService<
 
     if (options?.limit) query.limit(options.limit);
     if (options?.offset) query.offset(options.offset);
-    return query as unknown as Promise<TResponse[]>;
+
+    const rows = await query;
+
+    if (options?.joins?.length) {
+      const primaryName = (this.table as any)[Symbol.for('drizzle:Name')];
+      return rows.map((row: any) => {
+        const result = { ...row[primaryName] };
+        for (const join of options.joins!) {
+          const joinedName = (join.table as any)[Symbol.for('drizzle:Name')];
+          deepSet(result, join.as, row[joinedName] ?? null);
+        }
+        return result;
+      }) as unknown as TResponse[];
+    }
+
+    return rows as unknown as TResponse[];
   }
 
   async findOne(where: SQL): Promise<TResponse | undefined> {
@@ -243,20 +414,28 @@ export class CrudService<
   }
 
   async create(data: TCreate): Promise<TResponse> {
-    const rows = await (this.db
-      .insert(this.table as PgTable)
-      .values(data as InferInsertModel<TTable>)
-      .returning() as unknown as Promise<TResponse[]>);
-    return rows[0];
+    try {
+      const rows = await (this.db
+        .insert(this.table as PgTable)
+        .values(data as InferInsertModel<TTable>)
+        .returning() as unknown as Promise<TResponse[]>);
+      return rows[0];
+    } catch (err) {
+      this.handleError(err, 'create');
+    }
   }
 
   async update(where: SQL, data: TUpdate): Promise<TResponse> {
-    const rows = await (this.db
-      .update(this.table as PgTable)
-      .set(data as Partial<InferInsertModel<TTable>>)
-      .where(where)
-      .returning() as unknown as Promise<TResponse[]>);
-    return rows[0];
+    try {
+      const rows = await (this.db
+        .update(this.table as PgTable)
+        .set(data as Partial<InferInsertModel<TTable>>)
+        .where(where)
+        .returning() as unknown as Promise<TResponse[]>);
+      return rows[0];
+    } catch (err) {
+      this.handleError(err, 'update');
+    }
   }
 
   async updateById(id: string | number, data: TUpdate): Promise<TResponse> {
@@ -267,11 +446,18 @@ export class CrudService<
   }
 
   async delete(where: SQL): Promise<TResponse> {
-    const rows = await (this.db
-      .delete(this.table as PgTable)
-      .where(where)
-      .returning() as unknown as Promise<TResponse[]>);
-    return rows[0];
+    try {
+      const rows = await (this.db
+        .delete(this.table as PgTable)
+        .where(where)
+        .returning() as unknown as Promise<TResponse[]>);
+      if (!rows[0]) {
+        throw new NotFoundException('Record not found');
+      }
+      return rows[0];
+    } catch (err) {
+      this.handleError(err, 'delete');
+    }
   }
 
   async deleteById(id: string | number): Promise<TResponse> {
@@ -336,13 +522,23 @@ export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
     handlers,
     exclude = [],
     allowedFilters = [],
+    relations = {},
   } = options;
 
   const excludeSet = new Set(exclude);
   const allowedFields = new Set(allowedFilters);
+  const relationNames = Object.keys(relations);
 
   function filterQueries(): MethodDecorator {
     return (target, key, descriptor) => {
+      if (relationNames.length > 0) {
+        ApiQuery({
+          name: 'include',
+          required: false,
+          type: String,
+          description: `Comma-separated relations to include (${relationNames.join(', ')})`,
+        })(target, key, descriptor);
+      }
       for (const field of allowedFields) {
         for (const { suffix, label } of GENERATED_QUERY_PARAMS) {
           const isDefault = suffix === '';
@@ -397,7 +593,16 @@ export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
         });
       }
 
-      return this.service.findAll({ filters: andFilters, orFilters });
+      const includeParam = query['include'];
+      const joins: JoinConfig[] = includeParam
+        ? resolveIncludes(
+            includeParam.split(',').map((s) => s.trim()),
+            relations,
+            this.service.table as AnyPgTable,
+          )
+        : [];
+
+      return this.service.findAll({ filters: andFilters, orFilters, joins });
     }
 
     @Get(':id')
@@ -441,7 +646,6 @@ export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
     }
 
     @Delete(':id')
-    @HttpCode(HttpStatus.NO_CONTENT)
     @ApiOperation({ summary: `Delete ${path}` })
     @ApiParam({ name: 'id', type: String })
     @ApiOkResponse(responseDto ? { type: responseDto } : { description: 'OK' })

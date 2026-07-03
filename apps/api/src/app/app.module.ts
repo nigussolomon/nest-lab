@@ -5,11 +5,17 @@ import { DrizzleModule } from '@nest-lab/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from '../users/users.module';
+import { PostsModule } from '../posts/posts.module';import { CategoriesModule } from '../categories/categories.module';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 @Module({
-  imports: [DrizzleModule.forRoot(drizzle(pool)), UsersModule],
+  imports: [
+    DrizzleModule.forRoot(drizzle(pool)),
+    UsersModule,
+    PostsModule,
+    CategoriesModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

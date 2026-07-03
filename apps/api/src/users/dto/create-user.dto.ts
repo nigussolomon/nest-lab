@@ -12,4 +12,11 @@ export class CreateUserDto {
     description: 'User display name',
   })
   name: string;
+
+  @ApiProperty({
+    example: 1,
+    description: 'Category ID',
+    required: false,
+  })
+  categoryId?: number;
 }
