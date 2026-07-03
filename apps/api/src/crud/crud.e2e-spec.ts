@@ -44,6 +44,9 @@ describeCrud('CRUD e2e', () => {
         authorId: 2,
       },
     ]);
+    await pool.query("SELECT setval('categories_id_seq', (SELECT COALESCE(MAX(id), 0) FROM categories))");
+    await pool.query("SELECT setval('users_id_seq', (SELECT COALESCE(MAX(id), 0) FROM users))");
+    await pool.query("SELECT setval('posts_id_seq', (SELECT COALESCE(MAX(id), 0) FROM posts))");
   }
 
   beforeAll(async () => {
