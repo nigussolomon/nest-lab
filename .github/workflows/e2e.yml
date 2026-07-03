@@ -41,6 +41,8 @@ jobs:
 
       - run: bun install --no-cache
 
+      - run: bun drizzle-kit push --config apps/api/drizzle.config.ts
+
       - run: bun nx e2e api
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nest_lab
