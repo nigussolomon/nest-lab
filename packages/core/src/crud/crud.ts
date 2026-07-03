@@ -119,6 +119,7 @@ export interface FilterEntry {
   column: string;
   operator: FilterOperator;
   value: string;
+  relation?: string;
 }
 
 export interface RelationConfig {
@@ -143,6 +144,24 @@ export interface FindAllOptions {
   filters?: FilterEntry[];
   orFilters?: FilterEntry[];
   joins?: JoinConfig[];
+}
+
+function resolveRelationPath(
+  path: string,
+  relations: Record<string, RelationConfig>,
+  rootTable: AnyPgTable,
+): AnyPgTable | null {
+  if (!path) return rootTable;
+  const parts = path.split('.');
+  let current: Record<string, RelationConfig> = relations;
+  let table: AnyPgTable | null = null;
+  for (const part of parts) {
+    const cfg = current[part];
+    if (!cfg) return null;
+    table = cfg.table;
+    current = cfg.relations ?? {};
+  }
+  return table;
 }
 
 function camelize(snake: string): string {
@@ -342,10 +361,17 @@ export class CrudService<
       }
     }
 
+    const joinMap = new Map(
+      (options?.joins ?? []).map((j) => [j.as, j]),
+    );
+
     const mapEntries = (entries: FilterEntry[] | undefined) => {
       return (entries ?? [])
         .map((e) => {
-          const col = (this.table as unknown as Record<string, any>)[e.column];
+          const src = e.relation
+            ? (joinMap.get(e.relation)?.table as unknown as Record<string, any>)
+            : (this.table as unknown as Record<string, any>);
+          const col = src?.[e.column];
           if (!col) return null;
           if (e.operator === 'isNull' || e.operator === 'isNotNull') {
             return buildCondition(col, '', e.operator);
@@ -468,30 +494,6 @@ export class CrudService<
   }
 }
 
-function parseFilterParam(
-  key: string,
-  allowedFields: Set<string>,
-): { field: string; operator: FilterOperator; or: boolean } | null {
-  const parts = key.split('__');
-  const field = parts[0];
-  if (!allowedFields.has(field)) return null;
-
-  let operator: FilterOperator = DEFAULT_OPERATOR;
-  let or = false;
-
-  for (const suffix of parts.slice(1)) {
-    const lower = suffix.toLowerCase();
-    if (lower === 'or') {
-      or = true;
-    } else {
-      const op = OPERATOR_SUFFIXES[lower];
-      if (op) operator = op;
-    }
-  }
-
-  return { field, operator, or };
-}
-
 const GENERATED_QUERY_PARAMS = [
   { suffix: '', label: 'contains' },
   { suffix: '__eq', label: 'eq' },
@@ -581,25 +583,50 @@ export function CrudControllerFactory<TService extends CrudService<AnyPgTable>>(
 
       const andFilters: FilterEntry[] = [];
       const orFilters: FilterEntry[] = [];
+      const relationPaths = new Set<string>();
+
+      function parseField(raw: string) {
+        const parts = raw.split('__');
+        const field = parts[0];
+        let operator: FilterOperator = DEFAULT_OPERATOR;
+        let or = false;
+        for (const suffix of parts.slice(1)) {
+          const lower = suffix.toLowerCase();
+          if (lower === 'or') or = true;
+          else { const op = OPERATOR_SUFFIXES[lower]; if (op) operator = op; }
+        }
+        return { field, operator, or };
+      }
+
+      const resolveRelationField = (field: string): { path: string; column: string } | null => {
+        const idx = field.lastIndexOf('.');
+        if (idx === -1) return null;
+        const path = field.slice(0, idx);
+        const column = field.slice(idx + 1);
+        return resolveRelationPath(path, relations, (this as any).service.table as AnyPgTable) ? { path, column } : null;
+      };
 
       for (const [key, value] of Object.entries(query)) {
-        const parsed = parseFilterParam(key, allowedFields);
-        if (!parsed) continue;
-        const target = parsed.or ? orFilters : andFilters;
-        target.push({
-          column: parsed.field,
-          operator: parsed.operator,
-          value,
-        });
+        const { field, operator, or } = parseField(key);
+        const isOr = or;
+        const target = isOr ? orFilters : andFilters;
+
+        const rel = resolveRelationField(field);
+        if (rel) {
+          relationPaths.add(rel.path);
+          target.push({ column: rel.column, operator, value, relation: rel.path });
+        } else if ((allowedFields as Set<string>).has(field)) {
+          target.push({ column: field, operator, value });
+        }
       }
 
       const includeParam = query['include'];
-      const joins: JoinConfig[] = includeParam
-        ? resolveIncludes(
-            includeParam.split(',').map((s) => s.trim()),
-            relations,
-            this.service.table as AnyPgTable,
-          )
+      const paths = includeParam
+        ? includeParam.split(',').map((s) => s.trim())
+        : [];
+      for (const p of relationPaths) paths.push(p);
+      const joins: JoinConfig[] = paths.length
+        ? resolveIncludes(paths, relations, this.service.table as AnyPgTable)
         : [];
 
       return this.service.findAll({ filters: andFilters, orFilters, joins });
