@@ -4,11 +4,12 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { DrizzleModule } from '@nest-lab/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { UsersModule } from '../users/users.module';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 @Module({
-  imports: [DrizzleModule.forRoot(drizzle(pool))],
+  imports: [DrizzleModule.forRoot(drizzle(pool)), UsersModule],
   controllers: [AppController],
   providers: [AppService],
 })
